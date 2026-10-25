@@ -4,6 +4,7 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
+import auth
 import db
 import llm
 
@@ -17,7 +18,8 @@ ENV_KEYS = {
     llm.GEMINI: ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
     llm.CLAUDE: ("ANTHROPIC_API_KEY",),
 }
-CHAT_HISTORY_LIMIT = 50  # most recent recipes sent to the nutritionist as context
+RECIPE_CONTEXT_LIMIT = 50  # most recent recipes sent to the nutritionist as context
+CHAT_CONTEXT_MESSAGES = 40  # most recent chat messages sent back to the model (kept even: user/assistant pairs)
 
 
 def env_api_key(provider: str) -> str:
@@ -47,8 +49,53 @@ def render_recipe(recipe: dict, show_title: bool = True) -> None:
         st.markdown("\n".join(f"{i}. {step}" for i, step in enumerate(recipe["instructions"], 1)))
 
 
-# ---------- Sidebar: provider + API key ----------
+def login_screen() -> None:
+    st.title("🥗 Food Wizard")
+    st.caption("Log in to see your recipes and chat with your nutritionist. Each account's data is private.")
+    login_tab, signup_tab = st.tabs(["Log in", "Create account"])
+
+    with login_tab:
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            if st.form_submit_button("Log in", type="primary"):
+                user = auth.login(username, password)
+                if user:
+                    st.session_state.user = user
+                    st.rerun()
+                st.error("Incorrect username or password.")
+
+    with signup_tab:
+        with st.form("signup_form"):
+            username = st.text_input("Username", help="3-32 characters: letters, numbers, '.', '_' or '-'")
+            password = st.text_input("Password", type="password", help=f"At least {auth.MIN_PASSWORD_LENGTH} characters")
+            confirm = st.text_input("Confirm password", type="password")
+            if st.form_submit_button("Create account", type="primary"):
+                if password != confirm:
+                    st.error("Passwords don't match.")
+                else:
+                    try:
+                        st.session_state.user = auth.register(username, password)
+                    except ValueError as e:
+                        st.error(str(e))
+                    else:
+                        st.rerun()
+
+
+if "user" not in st.session_state:
+    login_screen()
+    st.stop()
+
+user_id = st.session_state.user["id"]
+
+# ---------- Sidebar: account, provider + API key ----------
 with st.sidebar:
+    st.markdown(f"Signed in as **{st.session_state.user['username']}**")
+    if st.button("Log out"):
+        st.session_state.clear()  # also drops API keys typed this session
+        st.rerun()
+    st.divider()
+
     st.header("⚙️ AI settings")
     provider = st.radio("Provider", [llm.GEMINI, llm.CLAUDE], horizontal=True)
     typed_key = st.text_input(
@@ -94,10 +141,10 @@ with new_tab:
                 except Exception as e:
                     st.error(f"Couldn't create a recipe: {e}")
                 else:
-                    st.session_state.last_recipe_id = db.save_recipe(recipe.model_dump(), ingredients, provider)
+                    st.session_state.last_recipe_id = db.save_recipe(user_id, recipe.model_dump(), ingredients, provider)
 
     if "last_recipe_id" in st.session_state:
-        last_recipe = db.get_recipe(st.session_state.last_recipe_id)
+        last_recipe = db.get_recipe(user_id, st.session_state.last_recipe_id)
         if last_recipe:
             st.success("Saved to My recipes.")
             render_recipe(last_recipe)
@@ -105,7 +152,7 @@ with new_tab:
 # ---------- Previous recipes ----------
 with history_tab:
     search = st.text_input("Search recipes", placeholder="Title, cuisine or ingredient").strip()
-    recipes = db.list_recipes(search=search)
+    recipes = db.list_recipes(user_id, search=search)
 
     if not recipes:
         st.info("No matching recipes." if search else "No recipes yet. Create one in the New recipe tab.")
@@ -122,19 +169,19 @@ with history_tab:
             with st.expander(label):
                 render_recipe(r, show_title=False)
                 if st.button("Delete recipe", key=f"delete_{r['id']}"):
-                    db.delete_recipe(r["id"])
+                    db.delete_recipe(user_id, r["id"])
                     st.rerun()
 
 # ---------- Nutritionist chat ----------
 with chat_tab:
     st.caption(
         "Ask about calories, macros, a calorie deficit, meal planning, or anything nutrition-related. "
-        f"Answers draw on your {CHAT_HISTORY_LIMIT} most recent saved recipes."
+        f"Answers draw on your {RECIPE_CONTEXT_LIMIT} most recent saved recipes."
     )
-    messages = st.session_state.setdefault("messages", [])
+    history = db.list_chat_messages(user_id)
 
     chat_box = st.container(height=450)
-    for m in messages:
+    for m in history:
         chat_box.chat_message(m["role"]).markdown(m["content"])
 
     question = st.chat_input("e.g. Which of my recipes fit a 1,800 kcal deficit day?")
@@ -142,19 +189,24 @@ with chat_tab:
         if not api_key:
             st.error(f"Add a {provider} API key in the sidebar first.")
         else:
-            messages.append({"role": "user", "content": question})
+            conversation = history[-CHAT_CONTEXT_MESSAGES:] + [{"role": "user", "content": question}]
             chat_box.chat_message("user").markdown(question)
             with chat_box.chat_message("assistant"):
                 try:
                     reply = st.write_stream(
-                        llm.stream_chat(provider, api_key, model, messages, db.list_recipes(limit=CHAT_HISTORY_LIMIT))
+                        llm.stream_chat(
+                            provider, api_key, model, conversation,
+                            db.list_recipes(user_id, limit=RECIPE_CONTEXT_LIMIT),
+                        )
                     )
                 except Exception as e:
-                    messages.pop()  # drop the unanswered question so the conversation stays valid
                     st.error(f"Couldn't get a reply: {e}")
                 else:
-                    messages.append({"role": "assistant", "content": reply})
+                    # Save the question only once it has an answer, so stored history stays in user/assistant pairs
+                    new_messages = [{"role": "user", "content": question}, {"role": "assistant", "content": reply}]
+                    db.add_chat_messages(user_id, new_messages)
+                    history += new_messages
 
-    if messages and st.button("Clear chat"):
-        messages.clear()
+    if history and st.button("Clear chat"):
+        db.clear_chat(user_id)
         st.rerun()

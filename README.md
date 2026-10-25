@@ -6,9 +6,10 @@ Works with **Google Gemini** or **Anthropic Claude**: bring your own API key for
 
 ## Features
 
+- **Private accounts**: sign up with a username and password. Each user only sees their own recipes and chat history, and the nutritionist only uses that user's data.
 - **Recipe generator**: enter ingredients (and optionally a cuisine) to get a full recipe with measurements, steps, prep time, servings, and estimated calories/protein/carbs/fat per serving.
 - **Recipe history**: every recipe is saved to `recipes.db` (SQLite). Search by title, cuisine, or ingredient; see average calories and protein; delete recipes you don't want.
-- **Nutritionist chat**: ask questions like *"Which of my recipes fit a 1,800 kcal day?"* or *"How can I get more protein from what I usually cook?"*. Answers are personalised using your saved recipes.
+- **Nutritionist chat**: ask questions like *"Which of my recipes fit a 1,800 kcal day?"* or *"How can I get more protein from what I usually cook?"*. Answers are personalised using your saved recipes, and the conversation is saved to your account.
 - **Provider choice**: switch between Gemini and Claude in the sidebar and pick the model.
 
 ## Getting started
@@ -55,16 +56,17 @@ Change the model in the sidebar to use any other model your key has access to.
 
 ## How it works
 
-The nutritionist chat uses a simple form of **RAG (retrieval-augmented generation)**: on each question, the app retrieves your 50 most recent recipes from SQLite and includes them (title, cuisine, servings, nutrition per serving, ingredients) in the model's system prompt. The model then answers using your actual eating history rather than generic advice.
+The nutritionist chat uses a simple form of **RAG (retrieval-augmented generation)**: on each question, the app retrieves the signed-in user's 50 most recent recipes from SQLite and includes them (title, cuisine, servings, nutrition per serving, ingredients) in the model's system prompt. The model then answers using your actual eating history rather than generic advice.
 
 At this scale, sending the recent history directly works better than embedding-based search. If the history grows too large for the prompt, the natural next step is to embed each recipe and retrieve only the most relevant ones per question.
 
 ## Project structure
 
 ```
-app.py               Streamlit UI: sidebar settings, recipe form, history, chat
+app.py               Streamlit UI: login, sidebar settings, recipe form, history, chat
+auth.py              Sign-up/login with scrypt-hashed passwords
 llm.py               Recipe schema + Gemini/Claude calls for recipes and chat
-db.py                SQLite storage for recipes (recipes.db)
+db.py                SQLite storage for users, recipes and chat history (recipes.db)
 .local.env.example   Template for API keys
 pyproject.toml       Project metadata and dependencies (managed with uv)
 ```
@@ -74,3 +76,6 @@ pyproject.toml       Project metadata and dependencies (managed with uv)
 - Nutrition values are AI estimates, not measured data. Treat them as a guide.
 - The chat gives general nutrition guidance and isn't a substitute for a doctor or registered dietitian.
 - `recipes.db` and `.local.env` are git-ignored, so your data and keys stay local.
+- Logins last for the browser session; refreshing the page asks you to log in again.
+- API keys in `.local.env` are shared by everyone using that server. If you host the app for other people, leave `.local.env` empty so each user enters their own key in the sidebar.
+- Upgrading from a version without accounts: existing recipes are assigned to the first account created.
