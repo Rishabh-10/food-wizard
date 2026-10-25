@@ -1,0 +1,4 @@
+.local.env
+recipes.db
+__pycache__/
+.venv/

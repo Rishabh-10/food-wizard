@@ -1,0 +1,20 @@
+[project]
+name = "food-wizard"
+version = "0.1.0"
+description = "Streamlit AI nutritionist: generates recipes from your ingredients with Gemini or Claude, stores them in SQLite, and answers nutrition questions using your recipe history."
+readme = "README.md"
+authors = [
+    { name = "Rishabh Bharota", email = "rishabhbharota@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=2.3.0",
+    "google-genai>=2.33.0",
+    "pydantic>=2.14.1",
+    "python-dotenv>=1.2.4",
+    "streamlit>=1.66.1",
+]
+
+[tool.uv]
+# Plain Streamlit app (run with `uv run streamlit run app.py`), not an installable package
+package = false
