@@ -4,14 +4,32 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
-import auth
 import db
 import llm
 
 load_dotenv(Path(__file__).parent / ".local.env", override=True)
 
 st.set_page_config(page_title="Food Wizard", page_icon="🥗", layout="wide")
-db.init_db()
+
+
+def secret(name: str):
+    """A value from .streamlit/secrets.toml (or the Streamlit Cloud secrets box), or None."""
+    try:
+        return st.secrets.get(name)
+    except FileNotFoundError:  # no secrets file at all
+        return None
+
+
+@st.cache_resource  # once per server process, not on every rerun, so the connection pool is reused
+def init_db(url: str | None) -> None:
+    db.init_db(url)
+
+
+try:
+    init_db(secret("DATABASE_URL"))
+except db.LegacyDatabaseError as e:
+    st.error(str(e))
+    st.stop()
 
 # Env vars checked (in order) when no key is typed into the sidebar
 ENV_KEYS = {
@@ -51,49 +69,32 @@ def render_recipe(recipe: dict, show_title: bool = True) -> None:
 
 def login_screen() -> None:
     st.title("🥗 Food Wizard")
-    st.caption("Log in to see your recipes and chat with your nutritionist. Each account's data is private.")
-    login_tab, signup_tab = st.tabs(["Log in", "Create account"])
-
-    with login_tab:
-        with st.form("login_form"):
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
-            if st.form_submit_button("Log in", type="primary"):
-                user = auth.login(username, password)
-                if user:
-                    st.session_state.user = user
-                    st.rerun()
-                st.error("Incorrect username or password.")
-
-    with signup_tab:
-        with st.form("signup_form"):
-            username = st.text_input("Username", help="3-32 characters: letters, numbers, '.', '_' or '-'")
-            password = st.text_input("Password", type="password", help=f"At least {auth.MIN_PASSWORD_LENGTH} characters")
-            confirm = st.text_input("Confirm password", type="password")
-            if st.form_submit_button("Create account", type="primary"):
-                if password != confirm:
-                    st.error("Passwords don't match.")
-                else:
-                    try:
-                        st.session_state.user = auth.register(username, password)
-                    except ValueError as e:
-                        st.error(str(e))
-                    else:
-                        st.rerun()
+    st.caption("Sign in to see your recipes and chat with your nutritionist. Each account's data is private.")
+    if not secret("auth"):
+        st.error(
+            "Google sign-in isn't set up yet. Copy `.streamlit/secrets.toml.example` to "
+            "`.streamlit/secrets.toml` and fill in the `[auth]` section (see the README)."
+        )
+        return
+    st.button("Sign in with Google", type="primary", on_click=st.login)
 
 
-if "user" not in st.session_state:
+if not secret("auth") or not st.user.is_logged_in:  # st.user has no is_logged_in until [auth] is configured
     login_screen()
     st.stop()
 
-user_id = st.session_state.user["id"]
+# st.user comes from a 30-day login cookie, so this survives refreshes; look the account up once per session
+if st.session_state.get("user_sub") != st.user.sub:
+    st.session_state.user_id = db.get_or_create_user(st.user.sub, st.user.get("email"), st.user.get("name"))
+    st.session_state.user_sub = st.user.sub
+user_id = st.session_state.user_id
 
 # ---------- Sidebar: account, provider + API key ----------
 with st.sidebar:
-    st.markdown(f"Signed in as **{st.session_state.user['username']}**")
+    st.markdown(f"Signed in as **{st.user.get('name') or st.user.get('email')}**")
     if st.button("Log out"):
         st.session_state.clear()  # also drops API keys typed this session
-        st.rerun()
+        st.logout()
     st.divider()
 
     st.header("⚙️ AI settings")
